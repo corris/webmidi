@@ -1,1 +1,218 @@
-<h1>Hello, World.</h1>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>iPadOS Web MIDI CC Pad</title>
+  <style>
+    :root { --bg:#111; --fg:#eee; --accent:#3b82f6; --danger:#ef4444; --border:#333; }
+    body { font-family: -apple-system, system-ui, sans-serif; margin:0; padding:1rem; background:var(--bg); color:var(--fg); }
+    h1 { font-size:1.3rem; margin:0 0 1rem; }
+    fieldset { border:1px solid var(--border); border-radius:8px; margin:0 0 1rem; padding:0.75rem 1rem; }
+    legend { padding:0 .4rem; }
+    label { display:block; font-size:.75rem; text-transform:uppercase; letter-spacing:.05em; margin-bottom:.25rem; }
+    select, input[type=number] { width:100%; padding:.4rem .5rem; border:1px solid var(--border); background:#1b1b1b; color:var(--fg); border-radius:6px; box-sizing:border-box; }
+    .row { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:.75rem; }
+    .grid { display:grid; gap:.75rem; }
+    button.pad { appearance:none; border:1px solid var(--border); background:#1d1d1d; color:var(--fg); padding:.75rem .5rem; border-radius:10px; font-size:.9rem; font-weight:500; position:relative; transition:.15s; }
+    button.pad:active { background:var(--accent); }
+    button.send { background:var(--accent); border:1px solid var(--accent); color:#fff; padding:.55rem .7rem; border-radius:6px; font-size:.75rem; cursor:pointer; }
+    button.send:active { filter:brightness(1.2); }
+    .configCard { background:#181818; border:1px solid var(--border); padding:.6rem .7rem .8rem; border-radius:10px; display:flex; flex-direction:column; gap:.45rem; }
+    .flex { display:flex; gap:.5rem; }
+    .small { font-size:.65rem; opacity:.65; }
+    footer { margin-top:2rem; font-size:.65rem; opacity:.55; }
+    .inline { display:inline-block; }
+    .danger { color:var(--danger); }
+    .successPulse { animation:pulse .6s; }
+    @keyframes pulse { from { box-shadow:0 0 0 0 rgba(59,130,246,.8); } to { box-shadow:0 0 0 12px rgba(59,130,246,0); } }
+    @media (hover:hover) { button.pad:hover { background:#242424; } }
+  </style>
+</head>
+<body>
+  <h1>Web MIDI CC Pad (9 Buttons)</h1>
+  <p class="small">Requires Web MIDI (Safari iPadOS 17+ Experimental Feature). Ensure it is enabled in Settings &gt; Safari &gt; Advanced &gt; Feature Flags.</p>
+
+  <fieldset>
+    <legend>Setup</legend>
+    <div class="row">
+      <div>
+        <label for="deviceSelect">MIDI Output Device</label>
+        <select id="deviceSelect"></select>
+      </div>
+      <div>
+        <label for="channelInput">Channel (1-16)</label>
+        <input type="number" id="channelInput" min="1" max="16" value="1" />
+      </div>
+    </div>
+    <div style="margin-top:.75rem" class="flex">
+      <button id="refreshBtn" class="send" type="button">Refresh Devices</button>
+      <button id="panicBtn" class="send" type="button" style="background:var(--danger); border-color:var(--danger);">All Notes Off (Panic)</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Buttons</legend>
+    <div id="pads" class="grid"></div>
+  </fieldset>
+
+  <footer>
+    Stored locally. Clearing browser data resets config. CC sends Control Change (status 0xB0 + channel). Panic sends CC 120-123 & 124-127 per spec.
+  </footer>
+
+<script>
+(function(){
+  const PAD_COUNT = 9;
+  const padsContainer = document.getElementById('pads');
+  const deviceSelect = document.getElementById('deviceSelect');
+  const channelInput = document.getElementById('channelInput');
+  const refreshBtn = document.getElementById('refreshBtn');
+  const panicBtn = document.getElementById('panicBtn');
+  let midiAccess = null;
+  let lastOutputs = [];
+
+  const defaultPadConfig = () => ({ label:"Button", cc:1, value:127 });
+  const loadConfig = () => {
+    try { return JSON.parse(localStorage.getItem('padConfigV1')) || Array.from({length:PAD_COUNT}, defaultPadConfig); } catch(e){ return Array.from({length:PAD_COUNT}, defaultPadConfig); }
+  };
+  const saveConfig = (cfg) => localStorage.setItem('padConfigV1', JSON.stringify(cfg));
+  let padConfig = loadConfig();
+
+  function buildPads(){
+    padsContainer.innerHTML='';
+    padConfig.forEach((cfg, idx)=>{
+      const card = document.createElement('div');
+      card.className='configCard';
+      const labelId = 'label_'+idx;
+      const ccId = 'cc_'+idx;
+      const valId = 'val_'+idx;
+      card.innerHTML = `
+        <div class="flex" style="align-items:center; justify-content:space-between;">
+          <input id="${labelId}" type="text" value="${cfg.label}" style="flex:1; padding:.45rem .55rem; background:#121212; border:1px solid var(--border); color:var(--fg); border-radius:6px;" />
+          <button class="pad" data-pad="${idx}" type="button" style="flex:1">Send</button>
+        </div>
+        <div class="row" style="grid-template-columns:repeat(auto-fit,minmax(90px,1fr));">
+          <div>
+            <label for="${ccId}">CC</label>
+            <input id="${ccId}" type="number" min="0" max="127" value="${cfg.cc}" />
+          </div>
+          <div>
+            <label for="${valId}">Value</label>
+            <input id="${valId}" type="number" min="0" max="127" value="${cfg.value}" />
+          </div>
+        </div>`;
+      padsContainer.appendChild(card);
+    });
+  }
+
+  function gatherCurrentConfig(){
+    padConfig = padConfig.map((cfg, idx)=>{
+      const label = document.getElementById('label_'+idx).value.trim() || 'Button';
+      const cc = clamp(parseInt(document.getElementById('cc_'+idx).value, 10),0,127);
+      const value = clamp(parseInt(document.getElementById('val_'+idx).value, 10),0,127);
+      return { label, cc, value };
+    });
+    saveConfig(padConfig);
+  }
+
+  function clamp(n,min,max){ return isNaN(n)?min:Math.min(Math.max(n,min),max); }
+
+  function currentOutput(){
+    const id = deviceSelect.value;
+    return lastOutputs.find(o=>o.id===id) || null;
+  }
+
+  function statusByte(){
+    const channel = clamp(parseInt(channelInput.value,10)-1,0,15);
+    return 0xB0 + channel; // Control Change base
+  }
+
+  function sendCC(cc,value){
+    const out = currentOutput();
+    if(!out){ flash(deviceSelect,'No device'); return; }
+    const msg = [statusByte(), clamp(cc,0,127), clamp(value,0,127)];
+    try { out.send(msg); flash(out._lastPadBtn || deviceSelect,'Sent'); } catch(e){ console.error(e); flash(deviceSelect,'Error'); }
+  }
+
+  function flash(el,msg){
+    if(!el) return;
+    el.classList.remove('successPulse');
+    void el.offsetWidth; // force reflow
+    el.classList.add('successPulse');
+  }
+
+  function buildDeviceSelect(){
+    if(!midiAccess) return;
+    const outputs = Array.from(midiAccess.outputs.values());
+    lastOutputs = outputs.map(o=>({ id:o.id, name:o.name, manufacturer:o.manufacturer, send:o.send.bind(o) }));
+    const prev = deviceSelect.value;
+    deviceSelect.innerHTML='';
+    outputs.forEach(o=>{
+      const opt=document.createElement('option');
+      opt.value=o.id; opt.textContent=(o.manufacturer?o.manufacturer+' • ':'')+o.name; deviceSelect.appendChild(opt);
+    });
+    if(outputs.length===0){
+      const opt=document.createElement('option'); opt.value=''; opt.textContent='No Outputs'; deviceSelect.appendChild(opt);
+    }
+    if(outputs.some(o=>o.id===prev)) deviceSelect.value=prev;
+  }
+
+  function requestAccess(){
+    navigator.requestMIDIAccess({ sysex:false }).then(access=>{
+      midiAccess = access;
+      buildDeviceSelect();
+      access.onstatechange = () => buildDeviceSelect();
+    }).catch(err=>{
+      console.error('MIDI Access Error', err);
+      alert('Failed to acquire MIDI access. Ensure Web MIDI is enabled in Safari settings.');
+    });
+  }
+
+  function attachEvents(){
+    padsContainer.addEventListener('click', e=>{
+      const padBtn = e.target.closest('button.pad');
+      if(padBtn){
+        gatherCurrentConfig();
+        const idx = parseInt(padBtn.dataset.pad,10);
+        const cfg = padConfig[idx];
+        const out = currentOutput();
+        if(out) out._lastPadBtn = padBtn;
+        sendCC(cfg.cc, cfg.value);
+      }
+    });
+
+    padsContainer.addEventListener('change', e=>{
+      const id = e.target.id;
+      if(id.startsWith('label_') || id.startsWith('cc_') || id.startsWith('val_')){
+        gatherCurrentConfig();
+      }
+    });
+
+    refreshBtn.addEventListener('click', ()=> buildDeviceSelect());
+
+    panicBtn.addEventListener('click', ()=>{
+      const out = currentOutput();
+      if(!out){ flash(deviceSelect,'No device'); return; }
+      const chStatus = statusByte();
+      // Send standard All Notes Off / Reset controllers
+      const panicCCs = [120,121,122,123,124,125,126,127];
+      panicCCs.forEach(cc=> out.send([chStatus, cc, 0]));
+      flash(panicBtn,'Panic');
+    });
+  }
+
+  function init(){
+    buildPads();
+    attachEvents();
+    if(!('requestMIDIAccess' in navigator)){
+      alert('Web MIDI not supported. Enable Experimental Feature or use a compatible browser.');
+      return;
+    }
+    requestAccess();
+  }
+
+  window.addEventListener('load', init, { once:true });
+})();
+</script>
+</body>
+</html>
